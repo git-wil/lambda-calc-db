@@ -20,7 +20,7 @@ module Core where
   import qualified System.IO
 
   import Debug.Trace (trace)
-
+  
 
   --
   -- Lambda-calculus syntax
@@ -39,6 +39,13 @@ module Core where
             | Redex AnsiCodes Expr  -- Mark a subexpression to be colorized
             | Parens Expr           -- parsing hack
 
+
+  --
+  -- De Bruijn expression mapping
+  --
+  type DBExpr = String      -- normalized expression in De Bruijn index
+  type DBMacroMap = M.Map DBExpr [MacroName] -- Map between indices and named macros
+
   --
   -- The interpreter configuration (called "context", though arguably it's really a "state")
   --
@@ -56,6 +63,8 @@ module Core where
                  , allParens :: Bool
                  , showColor :: Bool
                  , lastFilename :: Maybe String
+                 , suggestMacroResults :: Bool
+                 , deBruijnMacros :: DBMacroMap
                  }
       deriving (Show)
 
@@ -187,6 +196,31 @@ module Core where
     show (Betas n) | n > 1 = "→ᵦ ... →ᵦ  (by " ++ show n ++ " steps already seen above)"
     show (Betas _) = "  ??? a miracle occurred ???"
 
+  {------------------
+  - DE BRUIJN INDEX -
+  -------------------}
+  -- Convert an expression to its De Bruijn index
+  toDBExpr :: Env -> Expr -> DBExpr
+  toDBExpr env = toDB M.empty
+    where toDB :: M.Map Identifier Integer -> Expr -> DBExpr
+          toDB termDepths e = case e of -- termDepths maps from bound vars to parent binding index
+            Var v   -> maybe v show (M.lookup v termDepths) -- Bound vars become their depth, free vars remain
+            Num n   -> toDB termDepths (church n)           -- Convert a numeral to its corresponding expression first
+            Macro m -> maybe m (toDB termDepths) (M.lookup m env) -- Get the macro's converted expression before parsing
+            Lam x e1 -> "(\\" ++ toDB (M.insert x 1 (M.map succ termDepths)) e1 ++ ")"
+            App e1 e2 -> "(" ++ toDB termDepths e1 ++ " " ++ toDB termDepths e2 ++ ")"
+            Redex _ _ -> ""  -- We shouldn't see Redex's in our final output
+            Parens e1 -> "(" ++  toDB termDepths e1 ++ ")"
+
+  -- Create a De Bruijn index map for all macros in an environment
+  deBruijnMap :: Env -> DBMacroMap
+  deBruijnMap env = let macroToDB = M.map (toDBExpr env) env  -- Map all macros to DB index
+                    -- Create a new map from DB index to all equivalent macros
+                    in M.foldrWithKey (\k a -> M.insertWith (++) a [k]) M.empty macroToDB
+
+  findEquivMacros :: Expr -> DBExpr -> DBMacroMap -> [MacroName]
+  findEquivMacros expr dbExpr macroMap = M.findWithDefault [] dbExpr macroMap ++ maybe [] (pure . show) (isChurch expr)
+  
   {-------------------
    - CHURCH NUMERALS -
    -------------------}
@@ -196,8 +230,7 @@ module Core where
   church n =
      Lam "f" (Lam "b" (foldr App (Var "b") (replicate (fromIntegral n) (Var "f"))))
 
-
-  {-
+  
   isChurch :: Expr -> Maybe Integer
    -- Is this expression alpha-equivalent to a church numeral?
    --   As in lci, there might be false positives (e.g., False shows up as 0)
@@ -208,7 +241,6 @@ module Core where
     in
         loop body
   isChurch e = Nothing
-  -}
 
   -- Map from variable name to integers, used to implement alpha-equality
   type Numbering = M.Map Identifier Integer
@@ -397,13 +429,13 @@ module Core where
   --   and continue with 0 or more lowercase letters, digits, or
   --   primes (single quotes)
   ident =
-     (do c <- (lower <?> "variable")
+     (do c <- lower <?> "variable"
          cs <- many (lower <|> upper <|> digit <|> oneOf "\'")
          whitespace
          return $ c : cs) <?> "variable"
 
   ch :: Char -> Parser ()
-  -- ^ Confirm the presnce of a given character, possibly followed by whitespace
+  -- ^ Confirm the presence of a given character, possibly followed by whitespace
   ch c =
      do _ <- char c
         whitespace
@@ -417,22 +449,19 @@ module Core where
 
   num :: Parser Expr
   num =
-     (do n <- number
-         return $ Num n) <?> "a number"
+     (do Num <$> number) <?> "a number"
 
   lam :: Parser Expr
   lam =
-     do ((ch '\\' <|> ch 'λ') <?> "a lambda")
+     do (ch '\\' <|> ch 'λ') <?> "a lambda"
         id <- ident
-        _ <- (oneOf ".,:" <?> "a separator")
+        _ <- oneOf ".,:" <?> "a separator"
         whitespace
-        body <- expr
-        return (Lam id body)
+        Lam id <$> expr
 
   var :: Parser Expr
   var =
-     do c <- ident
-        return $ Var c
+     do Var <$> ident
 
   macroId :: Parser String
   macroId =
@@ -443,8 +472,7 @@ module Core where
 
   macro :: Parser Expr
   macro =
-     do m <- macroId
-        return $ Macro m
+     do Macro <$> macroId
 
   atomic :: Parser Expr
   atomic =
@@ -524,25 +552,24 @@ module Core where
 
   exprInCtx :: Ctx -> Parser Expr
   exprInCtx ctx =
-    if (allParens ctx) then
+    if allParens ctx then
       do e <- expr
          case checkParens e of
            Left err -> fail err
            Right e' -> return e'
     else
-      do e <- expr
-         return $ stripParens e
+      do stripParens <$> expr
 
   defnOrExpr :: Ctx -> Parser (Either (MacroName, Expr) Expr)
-  defnOrExpr ctx =     (fmap Left $ const <$> line ctx <*> optional (ch ';'))
-                   <|> (fmap Right $ exprInCtx ctx)
+  defnOrExpr ctx =     fmap Left (const <$> line ctx <*> optional (ch ';'))
+                   <|> fmap Right (exprInCtx ctx)
 
   parseFile :: Ctx -> String -> IO Env
   parseFile ctx filename =
      do result <- Control.Exception.try
                    (do result <- parseFromFile (lciFile ctx) filename
                        case result of
-                            Left err -> do putStrLn (show err)
+                            Left err -> do print err
                                            putStrLn "ERROR: No macros loaded."
                                            return M.empty
                             Right macros -> return (M.fromList macros))
@@ -559,7 +586,7 @@ module Core where
 
      where
       showErr :: IOError -> String
-      showErr x = show x
+      showErr = show
 
   stripParens :: Expr -> Expr
   stripParens e =
@@ -628,7 +655,15 @@ module Core where
          (FullTrace, _)    -> printSteps ctx 0 steps
          (CompactTrace, _) -> printSteps' ctx steps
        putStrLn $ show' ctx whn
-       putStrLn $ "\n" ++ (show n) ++ " total steps" -- ++ " (" ++ show (length steps) ++ " shown)\n"
+       putStrLn $ "\n" ++ show n ++ " total steps" -- ++ " (" ++ show (length steps) ++ " shown)\n"
+       Control.Monad.when (suggestMacroResults ctx)
+        (let dbExpr = toDBExpr (environment ctx) whn
+             equivMacros = findEquivMacros whn dbExpr (deBruijnMacros ctx)
+        in do
+          putStrLn $ "\nDe Bruijn index: " ++ dbExpr
+          if null equivMacros then putStrLn "No equivalent macros found."
+          else putStrLn $ "This is equivalent to: " ++ Data.List.intercalate ", " equivMacros
+        )
 
 
   shortIndent :: String
@@ -750,7 +785,7 @@ module Core where
   -- The memo pad is used to simulate lazy evaluation to whnf.
   -- The set of identifiers contains all the free variables of the expression (and
   --    maybe more), and is used in capture-avoiding substitution. It's not
-  --    obvious thatthis is any more efficient in practice than re-computing free
+  --    obvious that this is any more efficient in practice than re-computing free
   --    variables from scratch every time we do a substitution, but it's how things are
   --    currently implemented.
   --
@@ -847,12 +882,12 @@ module Core where
 
                   (memo', nsteps1, steps1, Num n) ->
                      -- can only happen if expandUnappliedNumerals is False
-                     let f = (church n)
+                     let f = church n
                          (memo'', nsteps2, steps2, whn) = recur memo' (App f e2) avoid
                          nsteps = nsteps1 + nsteps2
                      in (memoize e (nsteps, whn) memo'',
                          nsteps,
-                         ( map (\ (w,r,z) -> (App w e2, r, App z e2)) steps1 ) ++
+                         map (\ (w,r,z) -> (App w e2, r, App z e2)) steps1 ++
                            [ (App (Redex ansiBefore (Num n)) e2,
                               ByDefinition ,
                               App (Redex ansiAfter f) e2)] ++
@@ -865,7 +900,7 @@ module Core where
                         App e1' e2)
 
 
-              _ -> (memo, 0, [], Macro ("oops"))
+              _ -> (memo, 0, [], Macro "oops")
 
     in
        recur
@@ -905,7 +940,7 @@ module Core where
 
   ansiColor :: Integer -> AnsiCodes
   ansiColor n =
-    (chr 27 : '[' : (show n) ++ "m", chr 27 : "[39m")
+    (chr 27 : '[' : show n ++ "m", chr 27 : "[39m")
 
   ansiUnderline :: AnsiCodes
   ansiUnderline =
