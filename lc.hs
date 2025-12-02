@@ -44,8 +44,9 @@ welcome = "Yet Another Lambda Calculus Interpreter, v1.0.1\n" ++
 help :: Ctx -> String
 help ctx =
        "\nControl commands:\n" ++
-       "  :set color <on|off>            colorize reductions     [currently " ++ onOff (showColor ctx) ++ "]\n" ++
-       "  :set trace <full|compact|off>  output during reduction [currently " ++ traceWord (showTrace ctx) ++ "]\n" ++
+       "  :set color <on|off>            colorize reductions       [currently " ++ onOff (showColor ctx) ++ "]\n" ++
+       "  :set trace <full|compact|off>  output during reduction   [currently " ++ traceWord (showTrace ctx) ++ "]\n" ++
+       "  :set suggest <on|off>          suggest macros in results [currently " ++ onOff (suggestMacroResults ctx) ++ "]\n" ++
     -- It's a secret!
     -- "  :set parens <on|off>           require all parentheses [currently " ++ onOff (allParens ctx) ++ "]\n" ++
        "  :load <filename>               load macros from specified file (or just :l)\n" ++
@@ -76,6 +77,8 @@ mkCtx env = Ctx { environment = env
                 , allParens = True
                 , showColor = True
                 , lastFilename = Nothing
+                , suggestMacroResults = False
+                , deBruijnMacros = deBruijnMap env
                 }
 
 main :: IO ()
@@ -148,6 +151,8 @@ repl ctx =
                 ["set", "trace", "full"]    -> return (True, ctx { showTrace = FullTrace })
                 ["set", "trace", "compact"] -> return (True, ctx { showTrace = CompactTrace })
                 ["set", "trace", "off"]     -> return (True, ctx { showTrace = NoTrace })
+                ["set", "suggest", "on"]     -> return (True, ctx { suggestMacroResults = True })
+                ["set", "suggest", "off"]     -> return (True, ctx { suggestMacroResults = False })
 
                 (cmd : names) | cmd `Data.List.isPrefixOf` "dumpmacros" ->
                   let env = environment ctx
@@ -160,7 +165,7 @@ repl ctx =
 
                 [cmd, fname] | cmd `Data.List.isPrefixOf` "load" ->
                   do env <- parseFile ctx fname
-                     let ctx' = ctx { environment = env, lastFilename = Just fname }
+                     let ctx' = ctx { environment = env, lastFilename = Just fname, deBruijnMacros = deBruijnMap env }
                      putStrLn (currentMacros ctx')
                      return (True, ctx')
 
@@ -169,7 +174,7 @@ repl ctx =
                      Nothing -> do putStrLn "ERROR: No file loaded, so nothing to reload\n\n"
                                    return (True, ctx)
                      Just fname -> do env <- parseFile ctx fname
-                                      let ctx' = ctx { environment = env }
+                                      let ctx' = ctx { environment = env, deBruijnMacros = deBruijnMap env }
                                       putStrLn (currentMacros ctx')
                                       return (True, ctx')
 
@@ -179,7 +184,7 @@ repl ctx =
                      
                 (cmd : macros@(_:_)) | cmd `Data.List.isPrefixOf` "undef" ->
                   let env' = foldr M.delete (environment ctx) macros
-                      ctx' = ctx { environment = env' }
+                      ctx' = ctx { environment = env', deBruijnMacros = deBruijnMap env' }
                   in  return (True, ctx')
 
                 _ ->
