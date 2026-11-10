@@ -36,7 +36,7 @@ prompt :: String
 prompt = program ++ "> "
 
 welcome :: String
-welcome = "Yet Another Lambda Calculus Interpreter, v1.0.1\n" ++
+welcome = "Yet Another Lambda Calculus Interpreter, v1.0.2\n" ++
           "Enter :help for a list of configuration commands\n" ++
           "To quit say :exit or ^D"
 
@@ -52,6 +52,7 @@ help ctx =
        "  :load <filename>               load macros from specified file (or just :l)\n" ++
        "  :reload                        load macros from last file (or just :r)\n" ++
        "  :help                          show this list\n" ++
+       "  :exit                          quit the program\n" ++
        (currentMacros ctx) ++ "\n"
 
   where
